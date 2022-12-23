@@ -12,7 +12,8 @@
 
 // To make sure that different push operations will attempt to wake up different threads, we will use a push_mtx mutex.
 // To make sure that different pop operations will sleep using different cnd_t objects, we will use a pop_mtx mutex.
-mtx_t push_mtx, pop_mtx;
+static mtx_t push_mtx, pop_mtx, opening_shot_mtx, thread_ready_mtx;
+static cnd_t opening_shot_cnd, thread_ready_cnd;
 
 struct thread_sync {
     mtx_t mtx;
@@ -84,22 +85,10 @@ void push(struct queue * q, char * path) {
     mtx_unlock(&push_mtx);
 }
 
-void cleanup(struct sync * sync) {
-    atomic_int i;
-    for (i = 0; i < num_threads; i++) {
-        mtx_lock(&(thread_syncs[i]->mtx));
-        cnd_signal(&(thread_syncs[i]->not_empty));
-        mtx_unlock(&(thread_syncs[i]->mtx));
-    }
-    mtx_unlock(*(sync->mtx));
-    mtx_unlock(&pop_mtx);
-    thrd_exit(0);
-}
-
 char * pop(struct queue * q) {
     char * path;
     struct entry * e;
-    struct thread_sync * sync;
+    struct thread_sync * sync, * sleeper_sync;
     atomic_int new_sleep_tail_idx;
     // First we make sure that if there are no paths in the queue, consecutive pops will sleep on different cnd_t objects
     printf("pop\n");
@@ -113,7 +102,15 @@ char * pop(struct queue * q) {
         num_sleeping++;
         // If all threads should be sleeping, we've finished searching files and should exit the program (during cleanup the thread will exit, so num_sleeping won't decrease)
         if (num_sleeping == num_threads) {
-            cleanup(sync);
+            sleeper_sync = thread_syncs[sleep_head_idx];
+            mtx_lock(&(sleeper_sync->mtx));
+            cnd_signal(&(sleeper_sync->not_empty));
+            mtx_unlock(&(sleeper_sync->mtx));
+            
+            sleep_head_idx = (sleep_head_idx + 1) % num_threads;
+            mtx_unlock(&(sync->mtx));
+            mtx_unlock(&pop_mtx);
+            thrd_exit(0);
         }
 
         // Dividing this operation to 2 lines, to make sure that the value in sleep_tail_idx is in [0, num_threads - 1]
@@ -216,6 +213,22 @@ void thread_scan(struct queue * q) {
 }
 
 
+void halted_thread_scan(struct queue * q) {
+    mtx_lock(&opening_shot_mtx);
+
+    // Signal the main thread it can continue to create the next thread
+    mtx_lock(&thread_ready_mtx);
+    cnd_signal(&thread_ready_cnd);
+    mtx_unlock(&thread_ready_mtx);
+
+    // Wait for the main thread to signal that it's ready to start scanning
+    cnd_wait(&opening_shot_cnd, &opening_shot_mtx);
+    mtx_unlock(&opening_shot_mtx);
+
+    thread_scan(q);
+}
+
+
 ///////////////////////////
 // Main thread
 
@@ -244,6 +257,10 @@ int main(int argc, char** argv) {
     // Initialize sync variables
     mtx_init(&push_mtx, mtx_plain);
     mtx_init(&pop_mtx, mtx_plain);
+    mtx_init(&opening_shot_mtx, mtx_recursive);
+    cnd_init(&opening_shot_cnd);
+    mtx_init(&thread_ready_mtx, mtx_recursive);
+    cnd_init(&thread_ready_cnd);
 
     experienced_error = 0;
     
@@ -282,8 +299,27 @@ int main(int argc, char** argv) {
     }
     
     for (i = 0; i < num_threads; i++) {
-        thrd_create(&threads[i], (thrd_start_t)thread_scan, q);
+        // Create a thread
+        mtx_lock(&opening_shot_mtx);
+        thrd_create(&threads[i], (thrd_start_t)halted_thread_scan, q);
+        mtx_unlock(&opening_shot_mtx);
+
+        // Wait for the thread to signal that the next one can be created
+        mtx_lock(&thread_ready_mtx);
+        cnd_wait(&thread_ready_cnd, &thread_ready_mtx);
+        mtx_unlock(&thread_ready_mtx);
     }
+
+    // Signal all threads to start scanning
+    mtx_lock(&opening_shot_mtx);
+    cnd_broadcast(&opening_shot_cnd);
+    mtx_unlock(&opening_shot_mtx);
+
+    // Destroy setup sync variables
+    mtx_destroy(&opening_shot_mtx);
+    cnd_destroy(&opening_shot_cnd);
+    mtx_destroy(&thread_ready_mtx);
+    cnd_destroy(&thread_ready_cnd);
 
     for (i = 0; i < num_threads; i++) {
         thrd_join(threads[i], NULL);
