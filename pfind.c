@@ -121,7 +121,7 @@ char * pop(struct queue * q) {
     curr_sleep_tail_idx = sleep_tail_idx;
     
     while (q->head == NULL) {
-        
+        printf("Thread %ld is sleeping", thrd_current());
         num_sleeping++;
         // If all threads should be sleeping, we've finished searching files and should exit the program (during cleanup the thread will exit, so num_sleeping won't decrease)
         if (num_sleeping == num_threads) {
@@ -137,11 +137,12 @@ char * pop(struct queue * q) {
         
         cnd_wait(&thread_syncs[curr_sleep_tail_idx], &q_mtx);
         num_sleeping--;
-        cnd_signal(&push_cnd);
     }
 
     path = simple_pop(q);
-
+    
+    cnd_signal(&push_cnd);
+    printf("Thread %ld is sleeping", thrd_current());
     mtx_unlock(&q_mtx);
     return path;
 }
