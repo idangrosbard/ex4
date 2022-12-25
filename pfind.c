@@ -16,12 +16,7 @@ static mtx_t opening_shot_mtx;
 // To make sure that access to the Q is synchronized
 static mtx_t q_mtx;
 
-struct thread_sync {
-    mtx_t mtx;
-    cnd_t not_empty;
-};
-
-static struct thread_sync ** thread_syncs; // Each sleeping thread will wait on a single thread_sync
+static cnd_t * thread_syncs; // Each sleeping thread will wait on a single thread_sync
 static atomic_int num_threads = 0; // The number of thread_syncs
 static atomic_int sleep_head_idx = 0; // The index of the thread_sync that the next push operation will wake up
 static atomic_int sleep_tail_idx = 0; // The index of the thread_sync that the next pop operation will sleep on
@@ -52,7 +47,7 @@ void init(struct queue * q) {
 }
 
 void push(struct queue * q, char * path) {
-    struct thread_sync * sync;
+    cnd_t sync;
     struct entry * e;
     // First we make sure that if there are sleeping threads, the push will send different wake up signals according to FIFO order
     mtx_lock(&q_mtx);
@@ -77,17 +72,17 @@ void push(struct queue * q, char * path) {
     
     // If there exists a thread that went to sleep, wake it up (we just added a new path to the queue)
     if (sleep_head_idx != sleep_tail_idx) {
-        cnd_signal(&(sync->not_empty));
+        cnd_signal(&sync);
         sleep_head_idx = (sleep_head_idx + 1) % num_threads;
     }
 
     mtx_unlock(&q_mtx);
 }
 
-void cleanup(struct sync * sync) {
+void cleanup() {
     atomic_int i;
     for (i = 0; i < num_threads; i++) {
-        cnd_signal(&(thread_syncs[i]->not_empty));
+        cnd_signal(&thread_syncs[i]);
     }
     mtx_unlock(&q_mtx);
     thrd_exit(0);
@@ -97,7 +92,7 @@ void cleanup(struct sync * sync) {
 char * pop(struct queue * q) {
     char * path;
     struct entry * e;
-    struct thread_sync * sync, * sleeper_sync;
+    cnd_t sync;
     atomic_int new_sleep_tail_idx;
     // First we make sure that if there are no paths in the queue, consecutive pops will sleep on different cnd_t objects
     printf("pop\n");
@@ -110,14 +105,14 @@ char * pop(struct queue * q) {
         num_sleeping++;
         // If all threads should be sleeping, we've finished searching files and should exit the program (during cleanup the thread will exit, so num_sleeping won't decrease)
         if (num_sleeping == num_threads) {
-            cleanup(sync);
+            cleanup();
         }
 
         // Dividing this operation to 2 lines, to make sure that the value in sleep_tail_idx is in [0, num_threads - 1]
         new_sleep_tail_idx = (sleep_tail_idx + 1) % num_threads;
         sleep_tail_idx = new_sleep_tail_idx;
         
-        cnd_wait(&(sync->not_empty), &q_mtx);
+        cnd_wait(&sync, &q_mtx);
         num_sleeping--;
     }
 
@@ -258,7 +253,7 @@ int main(int argc, char** argv) {
 
     experienced_error = 0;
     
-    thread_syncs = malloc(sizeof(struct thread_sync *) * num_threads);
+    thread_syncs = malloc(sizeof(cnd_t) * num_threads);
     if (thread_syncs == NULL) {
         fprintf(stderr, "Error: malloc failed.\n");
         exit(1);
@@ -266,14 +261,7 @@ int main(int argc, char** argv) {
     
     threads = malloc(sizeof(thrd_t) * num_threads);
     for (i = 0; i < num_threads; i++) {
-        thread_syncs[i] = malloc(sizeof(struct thread_sync));
-        if (thread_syncs[i] == NULL) {
-            fprintf(stderr, "Error: malloc failed.\n");
-            exit(1);
-        }
-        // Making this a recursive mutex for the cleanup function
-        mtx_init(&(thread_syncs[i]->mtx), mtx_recursive);
-        cnd_init(&(thread_syncs[i]->not_empty));
+        cnd_init(&thread_syncs[i]);
     }
 
     // Initialize queue
@@ -314,9 +302,7 @@ int main(int argc, char** argv) {
 
     for (i = 0; i < num_threads; i++) {
         thrd_join(threads[i], NULL);
-        mtx_destroy(&(thread_syncs[i]->mtx));
-        cnd_destroy(&(thread_syncs[i]->not_empty));
-        free(thread_syncs[i]);
+        cnd_destroy(&thread_syncs[i]);
     }
     free(thread_syncs);
     free(threads);
