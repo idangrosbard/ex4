@@ -129,6 +129,8 @@ char * pop(struct queue * q) {
 
     curr_sleep_tail_idx = sleep_tail_idx;
     
+    // If the queue is empty, we sleep until a new path is added to the queue
+    // If the queue isn't empty and there are still sleeping threads, we make sure the current thread will sleep (let the woken up thread read the current message from the queue first)
     while ((q->head == NULL) || num_sleeping > 0) {
         num_sleeping++;
         // If all threads should be sleeping, we've finished searching files and should exit the program (during cleanup the thread will exit, so num_sleeping won't decrease)
