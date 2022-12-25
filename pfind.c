@@ -32,24 +32,28 @@ static char * search_term; // The string we're searching for
 //static char * search_root; // The dir we're searchign in
 
 
-///////////////////////////////
-// A queue to hold the paths yet to be checked
-
+/// @brief An entry in the path queue
 struct entry {
     char * path;
     struct entry * next;
 };
 
+/// @brief A path queue struct
 struct queue {
     struct entry * head;
     struct entry * tail;
 };
 
+/// @brief Initializes a queue (setting head and tail to NULL)
+/// @param q pointer to the queue to initialize
 void init(struct queue * q) {
     q->head = NULL;
     q->tail = NULL;
 }
 
+/// @brief Pushing a new path to the queue (queue basic logic, not thread safe)
+/// @param q Pointer to the queue
+/// @param path Pointer to the path we wish to add to q
 void simple_push(struct queue * q, char * path) {
     struct entry * e;
     e = malloc(sizeof(struct entry));
@@ -69,9 +73,15 @@ void simple_push(struct queue * q, char * path) {
     }
 }
 
+/// @brief Pushing a new path to the queue (thread safe)
+/// @param q Pointer to the queue we wish to add items to
+/// @param path Pointer to the path we wish to add to q
 void push(struct queue * q, char * path) {
-    // First we make sure that if there are sleeping threads, the push will send different wake up signals according to FIFO order
+    // The push_mtx is used to make sure that after waking up a sleeping thread,
+    // no other thread would perform a push which could wake up another sleeping thread,
+    // possibly harming the FIFO thread order
     mtx_lock(&push_mtx);
+    // The q_mtx is used to keep the queue thread safe
     mtx_lock(&q_mtx);
 
     // Creating a queue entry and adding it to the queue
@@ -82,13 +92,16 @@ void push(struct queue * q, char * path) {
         cnd_signal(&(thread_syncs[sleep_head_idx]));
         
         sleep_head_idx = (sleep_head_idx + 1) % num_threads;
+        // Now we sleep the current thread to let the popping thread read the current message from the queue
         cnd_wait(&push_cnd, &q_mtx);
     }
     mtx_unlock(&q_mtx);
     mtx_unlock(&push_mtx);
 }
 
-
+/// @brief Basic queue logic for popping a path from the queue (not thread safe)
+/// @param q Pointer to the queue we wish to pop from 
+/// @return The path from the top of q
 char * simple_pop(struct queue * q) {
     char * path;
     struct entry * e;
@@ -105,6 +118,9 @@ char * simple_pop(struct queue * q) {
     return path;
 }
 
+/// @brief Popping a path from the queue (thread safe)
+/// @param q Pointer to the queue we wish to pop from
+/// @return Pointer to the path from the top of q
 char * pop(struct queue * q) {
     char * path;
     atomic_int new_sleep_tail_idx, curr_sleep_tail_idx;
@@ -132,7 +148,8 @@ char * pop(struct queue * q) {
     }
 
     path = simple_pop(q);
-
+    
+    // In case there is a pushing thread sleeping (giving priority to the current thread to read from the queue), we wake it up after reading.
     cnd_signal(&push_cnd);
     mtx_unlock(&q_mtx);
     return path;
@@ -141,12 +158,15 @@ char * pop(struct queue * q) {
 /////////////////////////////
 // Functions for the flow of each thread
 
+/// @brief Iterating the contents of directory 'path' and adding them to a path queue
+/// @param path path to the directory we wish to iterate 
+/// @param q pointer to the queue we wish to add the paths to
 void iterate_dir(struct queue * q, char* path) {
     DIR * dir;
     char * new_path;
     struct dirent * entry;
     dir = opendir(path);
-    // If we couldn't open the directory
+    // If we couldn't open the directory, we print an error
     if (dir == NULL) {
         fprintf(stderr, "%s\n", strerror(errno));
         experienced_error = 1;
@@ -163,6 +183,7 @@ void iterate_dir(struct queue * q, char* path) {
         // Creating a new path to push to the queue
         new_path = malloc(strlen(path) + strlen(entry->d_name) + 2);
         if (new_path != NULL) {
+            // Creating the string "(path)/(entry->d_name)\0"
             strcpy(new_path, path);
             strcat(new_path, "/");
             strcat(new_path, entry->d_name);
@@ -176,10 +197,16 @@ void iterate_dir(struct queue * q, char* path) {
     closedir(dir);
 }
 
+
+/// @brief main thread function for scanning the dirs in the queue
+/// @param q pointer to the q containing the paths
 void thread_scan(struct queue * q) {
     char * path;
     struct stat st;
+
+    // As long as there are paths in the queue, we scan them
     while ((path = pop(q)) != NULL) {
+        // Checking if we can access the path
         if (stat(path, &st) == -1) {
             fprintf(stderr, "%s\n", strerror(errno));
         }
@@ -192,7 +219,6 @@ void thread_scan(struct queue * q) {
                 if (errno == EACCES) {
                     printf("Directory %s: Permission denied.\n", path);
                 } else {
-                    printf("Directory '%s' error ", path);
                     fprintf(stderr, "%s\n", strerror(errno));
                     experienced_error = 1;
                 }
@@ -214,6 +240,8 @@ void thread_scan(struct queue * q) {
 }
 
 
+/// @brief Halted activation of thread_scan, to make sure all threads start scanning at the same time
+/// @param q pointer to the q containing the paths
 void halted_thread_scan(struct queue * q) {
     mtx_lock(&opening_shot_mtx);
 
@@ -228,13 +256,17 @@ void halted_thread_scan(struct queue * q) {
 }
 
 
-///////////////////////////
-// Main thread
 
+/// @brief printing the number of files found by the program
+/// @param num_found_files number of files found by the program matching the search term
 void exit_print(int num_found_files) {
     printf("Done searching, found %d files\n", num_found_files);
 }
 
+/// @brief Main logic of the program
+/// @param argc 
+/// @param argv 
+/// @return 
 int main(int argc, char** argv) {
     int i;
     struct queue * q;
@@ -265,13 +297,19 @@ int main(int argc, char** argv) {
 
     experienced_error = 0;
     
+    // Initialize condition variables
     thread_syncs = malloc(sizeof(cnd_t) * num_threads);
     if (thread_syncs == NULL) {
-        fprintf(stderr, "Error: malloc failed.\n");
+        fprintf(stderr, "Could not malloc\n");
         exit(1);
     }
     
     threads = malloc(sizeof(thrd_t) * num_threads);
+    if (threads == NULL) {
+        fprintf(stderr, "Could not malloc\n");
+        exit(1);
+    }
+
     for (i = 0; i < num_threads; i++) {
         cnd_init(&thread_syncs[i]);
     }
@@ -279,11 +317,11 @@ int main(int argc, char** argv) {
     // Initialize queue
     q = malloc(sizeof(struct queue));
     if (q == NULL) {
-        fprintf(stderr, "Error: malloc failed.\n");
+        fprintf(stderr, "Could not malloc\n");
         exit(1);
     }
-
     init(q);
+    // Insert the new path to the queue
     new_path = malloc(strlen(argv[1]) + 1);
     if (new_path != NULL) {
         strcpy(new_path, argv[1]);
@@ -292,6 +330,7 @@ int main(int argc, char** argv) {
         exit(1);
     }
     
+    // Create threads
     for (i = 0; i < num_threads; i++) {
         // Create a thread
         mtx_lock(&opening_shot_mtx);
@@ -312,10 +351,14 @@ int main(int argc, char** argv) {
     cnd_destroy(&opening_shot_cnd);
     cnd_destroy(&thread_ready_cnd);
 
+    // Wait for all threads to finish
     for (i = 0; i < num_threads; i++) {
         thrd_join(threads[i], NULL);
     }
 
+    exit_print(recognized_files);
+
+    // Cleanup
     for (i = 0; i < num_threads; i++) {
         cnd_destroy(&thread_syncs[i]);
     }
@@ -326,7 +369,6 @@ int main(int argc, char** argv) {
     free(thread_syncs);
     free(threads);
     free(q);
-    exit_print(recognized_files);
     
     return experienced_error;
 }
