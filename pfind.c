@@ -73,8 +73,9 @@ void push(struct queue * q, char * path) {
     cnd_t sync;
     // First we make sure that if there are sleeping threads, the push will send different wake up signals according to FIFO order
     
-    mtx_lock(&pop_mtx);
+    mtx_lock(&push_mtx);
     mtx_lock(&q_mtx);
+    printf("Thread %ld is pushing is pushing %s\n", thrd_current(), path);
     sync = thread_syncs[sleep_head_idx];
 
     // Creating a queue entry and adding it to the queue
@@ -84,20 +85,20 @@ void push(struct queue * q, char * path) {
     if (sleep_head_idx != sleep_tail_idx) {
         cnd_signal(&sync);
         sleep_head_idx = (sleep_head_idx + 1) % num_threads;
+        cnd_wait(&push_cnd, &q_mtx);
     }
-    cnd_wait(&push_cnd, &q_mtx);
     mtx_unlock(&q_mtx);
-    mtx_unlock(&pop_mtx);
+    mtx_unlock(&push_mtx);
 }
 
-void cleanup() {
-    atomic_int i;
-    for (i = 0; i < num_threads; i++) {
-        cnd_signal(&thread_syncs[i]);
-    }
-    mtx_unlock(&q_mtx);
-    thrd_exit(0);
-}
+// void cleanup() {
+//     atomic_int i;
+//     for (i = 0; i < num_threads; i++) {
+//         cnd_signal(&thread_syncs[i]);
+//     }
+//     mtx_unlock(&q_mtx);
+//     thrd_exit(EXIT_SUCCESS);
+// }
 
 char * simple_pop(struct queue * q) {
     char * path;
@@ -120,7 +121,6 @@ char * pop(struct queue * q) {
     cnd_t sync;
     atomic_int new_sleep_tail_idx;
     // First we make sure that if there are no paths in the queue, consecutive pops will sleep on different cnd_t objects
-    printf("pop\n");
     mtx_lock(&q_mtx);
     sync = thread_syncs[sleep_tail_idx];
     
@@ -130,14 +130,21 @@ char * pop(struct queue * q) {
         num_sleeping++;
         // If all threads should be sleeping, we've finished searching files and should exit the program (during cleanup the thread will exit, so num_sleeping won't decrease)
         if (num_sleeping == num_threads) {
-            cleanup();
+            printf("num_sleeping: %d\n", num_sleeping);
+            printf("Starting cleanup. Thread: %ld\n", thrd_current());
+            cnd_signal(&thread_syncs[sleep_head_idx]);
+            sleep_head_idx = (sleep_head_idx + 1) % num_threads;
+            mtx_unlock(&q_mtx);
+            thrd_exit(EXIT_SUCCESS);
         }
 
         // Dividing this operation to 2 lines, to make sure that the value in sleep_tail_idx is in [0, num_threads - 1]
+        printf("Thread %ld, going to sleep on %d\n", thrd_current(), sleep_tail_idx);
         new_sleep_tail_idx = (sleep_tail_idx + 1) % num_threads;
         sleep_tail_idx = new_sleep_tail_idx;
         
         cnd_wait(&sync, &q_mtx);
+        printf("Thread %ld, waking up\n", thrd_current());
         num_sleeping--;
         cnd_signal(&push_cnd);
     }
@@ -324,6 +331,9 @@ int main(int argc, char** argv) {
 
     for (i = 0; i < num_threads; i++) {
         thrd_join(threads[i], NULL);
+    }
+
+    for (i = 0; i < num_threads; i++) {
         cnd_destroy(&thread_syncs[i]);
     }
     mtx_destroy(&q_mtx);
