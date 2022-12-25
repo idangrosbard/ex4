@@ -16,6 +16,10 @@ static mtx_t opening_shot_mtx;
 // To make sure that access to the Q is synchronized
 static mtx_t q_mtx;
 
+// To make sure that once a pop thread is awakend, all other sleeping thread will wait for it to finish
+static mtx_t push_mtx;
+static cnd_t push_cnd;
+
 static cnd_t * thread_syncs; // Each sleeping thread will wait on a single thread_sync
 static atomic_int num_threads = 0; // The number of thread_syncs
 static atomic_int sleep_head_idx = 0; // The index of the thread_sync that the next push operation will wake up
@@ -46,14 +50,8 @@ void init(struct queue * q) {
     q->tail = NULL;
 }
 
-void push(struct queue * q, char * path) {
-    cnd_t sync;
+void simple_push(struct queue * q, char * path) {
     struct entry * e;
-    // First we make sure that if there are sleeping threads, the push will send different wake up signals according to FIFO order
-    mtx_lock(&q_mtx);
-    sync = thread_syncs[sleep_head_idx];
-
-    // Creating a queue entry and adding it to the queue
     e = malloc(sizeof(struct entry));
     if (e == NULL) {
         fprintf(stderr, "Error allocating memory for queue entry");
@@ -69,14 +67,27 @@ void push(struct queue * q, char * path) {
         q->tail->next = e;
         q->tail = e;
     }
+}
+
+void push(struct queue * q, char * path) {
+    cnd_t sync;
+    // First we make sure that if there are sleeping threads, the push will send different wake up signals according to FIFO order
+    
+    mtx_lock(&pop_mtx);
+    mtx_lock(&q_mtx);
+    sync = thread_syncs[sleep_head_idx];
+
+    // Creating a queue entry and adding it to the queue
+    simple_push(q, path);
     
     // If there exists a thread that went to sleep, wake it up (we just added a new path to the queue)
     if (sleep_head_idx != sleep_tail_idx) {
         cnd_signal(&sync);
         sleep_head_idx = (sleep_head_idx + 1) % num_threads;
     }
-
+    cnd_wait(&push_cnd, &q_mtx);
     mtx_unlock(&q_mtx);
+    mtx_unlock(&pop_mtx);
 }
 
 void cleanup() {
@@ -88,10 +99,24 @@ void cleanup() {
     thrd_exit(0);
 }
 
+char * simple_pop(struct queue * q) {
+    char * path;
+    struct entry * e;
+    // Notice that this function is only called through pop.
+    // If the queue is empty, pop will make sure that the thread will sleep until a new path is added to the queue
+
+    e = q->head;
+    q->head = e->next;
+    if (q->head == NULL) {
+        q->tail = NULL;
+    }
+    path = e->path;
+    free(e);
+    return path;
+}
 
 char * pop(struct queue * q) {
     char * path;
-    struct entry * e;
     cnd_t sync;
     atomic_int new_sleep_tail_idx;
     // First we make sure that if there are no paths in the queue, consecutive pops will sleep on different cnd_t objects
@@ -114,17 +139,10 @@ char * pop(struct queue * q) {
         
         cnd_wait(&sync, &q_mtx);
         num_sleeping--;
+        cnd_signal(&push_cnd);
     }
 
-    // Popping the head of the queue
-    e = q->head;
-    q->head = e->next;
-    if (q->head == NULL) {
-        q->tail = NULL;
-    }
-    path = e->path;
-    printf("Got path %s\n", path);
-    free(e);
+    path = simple_pop(q);
 
     mtx_unlock(&q_mtx);
     return path;
@@ -245,8 +263,12 @@ int main(int argc, char** argv) {
         exit(1);
     }
 
-    // Initialize sync variables
+    // Initialize queue sync variables
     mtx_init(&q_mtx, mtx_plain);
+    mtx_init(&push_mtx, mtx_plain);
+    cnd_init(&push_cnd);
+
+    // Initialize thread startup sync variables (for the opening shot to all threads)
     mtx_init(&opening_shot_mtx, mtx_recursive);
     cnd_init(&opening_shot_cnd);
     cnd_init(&thread_ready_cnd);
@@ -304,6 +326,10 @@ int main(int argc, char** argv) {
         thrd_join(threads[i], NULL);
         cnd_destroy(&thread_syncs[i]);
     }
+    mtx_destroy(&q_mtx);
+    mtx_destroy(&push_mtx);
+    cnd_destroy(&push_cnd);
+
     free(thread_syncs);
     free(threads);
     free(q);
