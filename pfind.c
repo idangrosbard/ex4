@@ -80,6 +80,7 @@ void push(struct queue * q, char * path) {
     // If there exists a thread that went to sleep, wake it up (we just added a new path to the queue)
     if (sleep_head_idx != sleep_tail_idx) {
         cnd_signal(&(thread_syncs[sleep_head_idx]));
+        
         sleep_head_idx = (sleep_head_idx + 1) % num_threads;
         cnd_wait(&push_cnd, &q_mtx);
     }
@@ -87,14 +88,6 @@ void push(struct queue * q, char * path) {
     mtx_unlock(&push_mtx);
 }
 
-// void cleanup() {
-//     atomic_int i;
-//     for (i = 0; i < num_threads; i++) {
-//         cnd_signal(&thread_syncs[i]);
-//     }
-//     mtx_unlock(&q_mtx);
-//     thrd_exit(EXIT_SUCCESS);
-// }
 
 char * simple_pop(struct queue * q) {
     char * path;
@@ -121,7 +114,6 @@ char * pop(struct queue * q) {
     curr_sleep_tail_idx = sleep_tail_idx;
     
     while (q->head == NULL) {
-        printf("Thread %ld is sleeping", thrd_current());
         num_sleeping++;
         // If all threads should be sleeping, we've finished searching files and should exit the program (during cleanup the thread will exit, so num_sleeping won't decrease)
         if (num_sleeping == num_threads) {
@@ -140,9 +132,8 @@ char * pop(struct queue * q) {
     }
 
     path = simple_pop(q);
-    
+
     cnd_signal(&push_cnd);
-    printf("Thread %ld is sleeping", thrd_current());
     mtx_unlock(&q_mtx);
     return path;
 }
