@@ -124,14 +124,19 @@ char * simple_pop(struct queue * q) {
 char * pop(struct queue * q) {
     char * path;
     atomic_int new_sleep_tail_idx, curr_sleep_tail_idx, i;
-    // First we make sure that if there are no paths in the queue, consecutive pops will sleep on different cnd_t objects
+    
+    // If the queue was empty, and the a path was inserted, there is a chance that an outside thread will get the path before the sleeping one wakes up.
+    // To prevent that, we make all incoming threads pass through the push_mtx lock (as it will be freed only if the sleeping thread takes the path from the queue)
+    // Thread 1 sleeps on pop -> Thread 2 acquires push_mtx -> Thread 2 signals Thread 1 -> Thread 2 sleeps -> Thread 1 get the path -> Thread 1 signals Thread 2 -> Thread 2 drops push_mtx -> Thread 3 can enter pop
+    mtx_lock(&push_mtx);
+    mtx_unlock(&push_mtx);
     mtx_lock(&q_mtx);
 
     curr_sleep_tail_idx = sleep_tail_idx;
     
     // If the queue is empty, we sleep until a new path is added to the queue
     // If the queue isn't empty and there are still sleeping threads, we make sure the current thread will sleep (let the woken up thread read the current message from the queue first)
-    while ((q->head == NULL) || num_sleeping > 0) {
+    while (q->head == NULL) {
         num_sleeping++;
         // If all threads should be sleeping, we've finished searching files and should exit the program (during cleanup the thread will exit, so num_sleeping won't decrease)
         if (num_sleeping == num_threads) {
