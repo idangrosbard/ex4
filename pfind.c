@@ -129,7 +129,7 @@ char * pop(struct queue * q) {
 
     curr_sleep_tail_idx = sleep_tail_idx;
     
-    while (q->head == NULL) {
+    while ((q->head == NULL) || num_sleeping > 0) {
         num_sleeping++;
         // If all threads should be sleeping, we've finished searching files and should exit the program (during cleanup the thread will exit, so num_sleeping won't decrease)
         if (num_sleeping == num_threads) {
