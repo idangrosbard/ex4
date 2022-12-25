@@ -123,7 +123,7 @@ char * simple_pop(struct queue * q) {
 /// @return Pointer to the path from the top of q
 char * pop(struct queue * q) {
     char * path;
-    atomic_int new_sleep_tail_idx, curr_sleep_tail_idx;
+    atomic_int new_sleep_tail_idx, curr_sleep_tail_idx, i;
     // First we make sure that if there are no paths in the queue, consecutive pops will sleep on different cnd_t objects
     mtx_lock(&q_mtx);
 
@@ -133,8 +133,10 @@ char * pop(struct queue * q) {
         num_sleeping++;
         // If all threads should be sleeping, we've finished searching files and should exit the program (during cleanup the thread will exit, so num_sleeping won't decrease)
         if (num_sleeping == num_threads) {
-            cnd_signal(&thread_syncs[sleep_head_idx]);
-            sleep_head_idx = (sleep_head_idx + 1) % num_threads;
+            // Waking up all sleeping threads
+            for (i = 0; i < num_threads; i++) {
+                cnd_signal(&thread_syncs[i]);
+            }
             mtx_unlock(&q_mtx);
             return NULL;
         }
