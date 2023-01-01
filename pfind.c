@@ -129,8 +129,8 @@ char * pop(struct queue * q) {
     // To prevent that, we make all incoming threads pass through the push_mtx lock (as it will be freed only if the sleeping thread takes the path from the queue)
     // Thread 1 sleeps on pop -> Thread 2 acquires push_mtx -> Thread 2 signals Thread 1 -> Thread 2 sleeps -> Thread 1 get the path -> Thread 1 signals Thread 2 -> Thread 2 drops push_mtx -> Thread 3 can enter pop
     mtx_lock(&push_mtx);
-    mtx_unlock(&push_mtx);
     mtx_lock(&q_mtx);
+    mtx_unlock(&push_mtx);
 
     curr_sleep_tail_idx = sleep_tail_idx;
     
