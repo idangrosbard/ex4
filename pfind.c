@@ -136,8 +136,18 @@ char * pop(struct queue * q) {
     
     // If the queue is empty, we sleep until a new path is added to the queue
     // If the queue isn't empty and there are still sleeping threads, we make sure the current thread will sleep (let the woken up thread read the current message from the queue first)
-    while (q->head == NULL) {
+    if (q->head == NULL) {
         num_sleeping++;
+
+        // If not all threads are sleeping, we let the current thread go to sleep
+        if (num_sleeping < num_threads) {
+            // Dividing this operation to 2 lines, to make sure that the value in sleep_tail_idx is in [0, num_threads - 1]
+            new_sleep_tail_idx = (sleep_tail_idx + 1) % num_threads;
+            sleep_tail_idx = new_sleep_tail_idx;
+            
+            cnd_wait(&thread_syncs[curr_sleep_tail_idx], &q_mtx);
+        }
+
         // If all threads should be sleeping, we've finished searching files and should exit the program (during cleanup the thread will exit, so num_sleeping won't decrease)
         if (num_sleeping == num_threads) {
             // Waking up all sleeping threads
@@ -148,11 +158,6 @@ char * pop(struct queue * q) {
             return NULL;
         }
 
-        // Dividing this operation to 2 lines, to make sure that the value in sleep_tail_idx is in [0, num_threads - 1]
-        new_sleep_tail_idx = (sleep_tail_idx + 1) % num_threads;
-        sleep_tail_idx = new_sleep_tail_idx;
-        
-        cnd_wait(&thread_syncs[curr_sleep_tail_idx], &q_mtx);
         num_sleeping--;
     }
 
